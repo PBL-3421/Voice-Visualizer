@@ -1,0 +1,34 @@
+{
+  "name": "voice-visualizer",
+  "version": "1.0.0",
+  "description": "Audio visualizer driven by digital voice",
+  "author": "Maximizer",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --mac --x64"
+  },
+  "build": {
+    "appId": "com.maximizer.voicevisualizer",
+    "productName": "Voice Visualizer",
+    "mac": {
+      "category": "public.app-category.music",
+      "icon": "build/icon.icns",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Voice Visualizer uses the microphone to display real-time audio levels."
+      },
+      "target": [
+        { "target": "dir", "arch": ["x64"] }
+      ]
+    },
+    "asar": false,
+    "files": [
+      "main.js",
+      "index.html"
+    ]
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^26.0.0"
+  }
+}

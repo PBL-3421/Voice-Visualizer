@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voice Visualizer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    gap: 10px;
+    overflow: hidden;
+    /* whole window is draggable by default */
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    -webkit-app-region: drag; /* dragging the canvas moves the window */
+    cursor: grab;
+  }
+  canvas:active { cursor: grabbing; }
+  /* controls must be interactive, not drag handles */
+  #controls, button, input {
+    -webkit-app-region: no-drag;
+    user-select: text;
+  }
+  #controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 480px;
+  }
+  #textInput {
+    flex: 1;
+    background: #080000;
+    color: #ff2200;
+    border: 1px solid #550000;
+    padding: 8px 12px;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    outline: none;
+    caret-color: #ff2200;
+  }
+  #textInput::placeholder { color: #330000; }
+  button {
+    background: #080000;
+    color: #ff2200;
+    border: 1px solid #550000;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+  button:hover { background: #150000; }
+  button.active { background: #cc0000; color: #000; border-color: #cc0000; }
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="800"></canvas>
+<div id="controls">
+  <input id="textInput" type="text" placeholder="Type text to speak..."
+         value="Systems online. Voice synthesis active and ready.">
+  <button id="speakBtn">SPEAK</button>
+  <button id="micBtn">MIC</button>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const textInput = document.getElementById('textInput');
+const speakBtn  = document.getElementById('speakBtn');
+const micBtn    = document.getElementById('micBtn');
+
+// ── Layout ────────────────────────────────────────────────────────────────────
+const W = 480, H = 800;
+const N       = 16;
+const BAR_H   = 30;
+const GAP     = 3;
+const MID_W   = 100;
+const MIN_W   = MID_W * 0.80;
+
+const COLS = [W / 6, W / 2, W * 5 / 6];
+const SENS = [0.792, 1.1, 0.792];
+
+const TOTAL_H = N * BAR_H + (N - 1) * GAP;
+const TOP_Y   = (H - TOTAL_H) / 2;
+
+function barWidth(i) {
+  const steps = i <= 8 ? (8 - i) : (i - 9);
+  return MID_W - steps * ((MID_W - MIN_W) / 7);
+}
+
+// ── Audio ─────────────────────────────────────────────────────────────────────
+let audioCtx  = null;
+let analyser  = null;
+let tdData    = null;
+let micStream = null;
+let micOn     = false;
+
+async function toggleMic() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (micOn) {
+    if (micStream) micStream.getTracks().forEach(t => t.stop());
+    analyser = null; tdData = null; micStream = null;
+    micOn = false;
+    micBtn.textContent = 'MIC';
+    micBtn.classList.remove('active');
+    return;
+  }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    analyser  = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.55;
+    tdData = new Float32Array(analyser.fftSize);
+    audioCtx.createMediaStreamSource(micStream).connect(analyser);
+    micOn = true;
+    micBtn.textContent = 'MIC ON';
+    micBtn.classList.add('active');
+  } catch (e) {
+    alert('Microphone error: ' + e.message);
+  }
+}
+
+micBtn.addEventListener('click', toggleMic);
+
+// Auto-start mic on load
+window.addEventListener('load', () => setTimeout(toggleMic, 500));
+
+// ── TTS ───────────────────────────────────────────────────────────────────────
+let speaking = false;
+
+function doSpeak() {
+  const text = textInput.value.trim();
+  if (!text) return;
+  speechSynthesis.cancel();
+
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate  = 0.88;
+  utt.pitch = 0.72;
+
+  const voices = speechSynthesis.getVoices();
+  const pick = voices.find(v => /daniel|alex|fred|bruce|gordon|ralph/i.test(v.name))
+            || voices.find(v => v.lang === 'en-US')
+            || voices[0];
+  if (pick) utt.voice = pick;
+
+  utt.onstart = () => {
+    speaking = true;
+    speakBtn.textContent = 'STOP';
+    speakBtn.classList.add('active');
+  };
+  utt.onend = utt.onerror = () => {
+    speaking = false;
+    speakBtn.textContent = 'SPEAK';
+    speakBtn.classList.remove('active');
+  };
+
+  speechSynthesis.speak(utt);
+}
+
+speakBtn.addEventListener('click', () => {
+  if (speaking) {
+    speechSynthesis.cancel();
+    speaking = false;
+    speakBtn.textContent = 'SPEAK';
+    speakBtn.classList.remove('active');
+  } else {
+    doSpeak();
+  }
+});
+
+speechSynthesis.onvoiceschanged = () => {};
+
+// ── Audio level ───────────────────────────────────────────────────────────────
+function getRawLevel() {
+  if (analyser && tdData) {
+    analyser.getFloatTimeDomainData(tdData);
+    let sum = 0;
+    for (const s of tdData) sum += s * s;
+    return Math.min(1, Math.sqrt(sum / tdData.length) * 5.5);
+  }
+  if (speaking) {
+    const t = Date.now() / 1000;
+    const voiced = 0.30 + 0.22 * Math.abs(Math.sin(t * 3.8))
+                        + 0.12 * Math.sin(t * 7.1)
+                        + 0.06 * Math.sin(t * 13.5);
+    const noise  = (Math.random() - 0.5) * 0.12;
+    const gate   = Math.sin(t * 1.3) > -0.6 ? 1 : 0.25;
+    return Math.max(0, Math.min(1, (voiced + noise) * gate));
+  }
+  return 0;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+const levels = [0, 0, 0];
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+
+  const raw = getRawLevel();
+
+  for (let col = 0; col < 3; col++) {
+    const target = Math.min(1, raw * SENS[col]);
+    const attack = target > levels[col] ? 0.42 : 0.10;
+    levels[col] += (target - levels[col]) * attack;
+    const lv = levels[col];
+
+    const extraBars = lv * 7;
+    const cx = COLS[col];
+
+    for (let i = 1; i <= N; i++) {
+      const bw = barWidth(i);
+      const bx = cx - bw / 2;
+      const by = TOP_Y + (i - 1) * (BAR_H + GAP);
+
+      let lit = false;
+      if (i === 8 || i === 9) {
+        lit = lv > 0.015;
+      } else if (i < 8) {
+        const stepsAboveCenter = 8 - i;
+        lit = extraBars >= stepsAboveCenter - 0.05;
+      } else {
+        const stepsBelowCenter = i - 9;
+        lit = extraBars >= stepsBelowCenter - 0.05;
+      }
+
+      if (lit) {
+        const distFromCenter = i <= 8 ? (8 - i) : (i - 9);
+        const brightness = 1.0 - distFromCenter * 0.038;
+        const r = Math.floor(255 * brightness);
+        ctx.shadowColor = '#ff0000';
+        ctx.shadowBlur  = 10;
+        ctx.fillStyle   = `rgb(${r},0,0)`;
+      } else {
+        ctx.shadowBlur = 0;
+        ctx.fillStyle  = '#120000';
+      }
+
+      ctx.fillRect(bx, by, bw, BAR_H);
+    }
+  }
+
+  ctx.shadowBlur = 0;
+  requestAnimationFrame(draw);
+}
+
+draw();
+</script>
+</body>
+</html>

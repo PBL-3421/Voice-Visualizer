@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Voice Visualizer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    gap: 8px;
+    overflow: hidden;
+    -webkit-app-region: drag;
+    user-select: none;
+  }
+  canvas {
+    display: block;
+    -webkit-app-region: drag;
+    cursor: grab;
+  }
+  canvas:active { cursor: grabbing; }
+  #controls, #row2, #status, button, input, select {
+    -webkit-app-region: no-drag;
+    user-select: text;
+  }
+  #controls, #row2 {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    width: 480px;
+  }
+  #textInput {
+    flex: 1;
+    background: #080000;
+    color: #ff2200;
+    border: 1px solid #550000;
+    padding: 7px 10px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    outline: none;
+    caret-color: #ff2200;
+  }
+  #textInput::placeholder { color: #330000; }
+  button {
+    background: #080000;
+    color: #ff2200;
+    border: 1px solid #550000;
+    padding: 7px 12px;
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  button:hover { background: #150000; }
+  button.active { background: #cc0000; color: #000; border-color: #cc0000; }
+  #deviceSelect {
+    flex: 1;
+    background: #080000;
+    color: #ff2200;
+    border: 1px solid #550000;
+    padding: 7px 6px;
+    font-family: 'Courier New', monospace;
+    font-size: 11px;
+    cursor: pointer;
+    outline: none;
+    min-width: 0;
+  }
+  #deviceSelect option { background: #080000; color: #ff2200; }
+  #status {
+    width: 480px;
+    font-family: 'Courier New', monospace;
+    font-size: 10px;
+    color: #550000;
+    text-align: center;
+    letter-spacing: 0.5px;
+    min-height: 14px;
+  }
+  #status.ok  { color: #880000; }
+  #status.err { color: #ff4400; }
+</style>
+</head>
+<body>
+<canvas id="c" width="480" height="800"></canvas>
+
+<!-- Row 1: speak controls -->
+<div id="controls">
+  <input id="textInput" type="text" placeholder="Type text to speak..."
+         value="Systems online. Voice synthesis active and ready.">
+  <button id="speakBtn">SPEAK</button>
+  <button id="testBtn">TEST</button>
+</div>
+
+<!-- Row 2: audio source controls -->
+<div id="row2">
+  <select id="deviceSelect"></select>
+  <button id="refreshBtn">↺</button>
+  <button id="sysBtn">SYS</button>
+</div>
+
+<!-- Status line -->
+<div id="status" id="status">initializing...</div>
+
+<script>
+const canvas       = document.getElementById('c');
+const ctx          = canvas.getContext('2d');
+const textInput    = document.getElementById('textInput');
+const speakBtn     = document.getElementById('speakBtn');
+const testBtn      = document.getElementById('testBtn');
+const sysBtn       = document.getElementById('sysBtn');
+const refreshBtn   = document.getElementById('refreshBtn');
+const deviceSelect = document.getElementById('deviceSelect');
+const statusEl     = document.getElementById('status');
+
+function setStatus(msg, cls = '') {
+  statusEl.textContent = msg;
+  statusEl.className = cls;
+}
+
+// ── Layout ────────────────────────────────────────────────────────────────────
+const W = 480, H = 800;
+const N     = 16;
+const BAR_H = 30;
+const GAP   = 3;
+const MID_W = 100;
+const MIN_W = MID_W * 0.80;
+
+const COLS = [W / 6, W / 2, W * 5 / 6];
+const SENS = [0.792, 1.1, 0.792];
+
+const TOTAL_H = N * BAR_H + (N - 1) * GAP;
+const TOP_Y   = (H - TOTAL_H) / 2;
+
+function barWidth(i) {
+  const steps = i <= 8 ? (8 - i) : (i - 9);
+  return MID_W - steps * ((MID_W - MIN_W) / 7);
+}
+
+// ── Device enumeration ────────────────────────────────────────────────────────
+async function populateDevices() {
+  setStatus('scanning audio devices...');
+
+  // Ask for mic permission so device labels are revealed
+  try {
+    const tmp = await navigator.mediaDevices.getUserMedia({ audio: true });
+    tmp.getTracks().forEach(t => t.stop());
+  } catch (e) {
+    setStatus('⚠ mic permission denied — ' + e.message, 'err');
+    return;
+  }
+
+  let devices;
+  try {
+    devices = await navigator.mediaDevices.enumerateDevices();
+  } catch (e) {
+    setStatus('⚠ could not enumerate devices — ' + e.message, 'err');
+    return;
+  }
+
+  const inputs = devices.filter(d => d.kind === 'audioinput');
+  const prevId = deviceSelect.value;
+
+  deviceSelect.innerHTML = '';
+  inputs.forEach(d => {
+    const opt = document.createElement('option');
+    opt.value = d.deviceId;
+    const isVirtual = /blackhole|loopback|soundflower|virtual|stereo mix/i.test(d.label);
+    opt.textContent = (isVirtual ? '★ ' : '') + (d.label || 'Unknown device');
+    if (isVirtual) opt.style.color = '#ff6600';
+    deviceSelect.appendChild(opt);
+    if (d.deviceId === prevId) opt.selected = true;
+  });
+
+  // Auto-select virtual device if one exists and nothing else was chosen
+  const virtual = [...deviceSelect.options].find(o => o.textContent.startsWith('★'));
+  if (virtual && !inputs.find(d => d.deviceId === prevId)) virtual.selected = true;
+
+  if (inputs.length === 0) {
+    const o = document.createElement('option'); o.value = '';
+    o.textContent = 'No audio inputs found'; deviceSelect.appendChild(o);
+    setStatus('⚠ no audio input devices found', 'err');
+  } else if (virtual) {
+    setStatus('★ virtual audio device found — select it and click SYS', 'ok');
+  } else {
+    setStatus('no virtual audio device — install BlackHole for system audio', '');
+  }
+}
+
+navigator.mediaDevices.addEventListener('devicechange', populateDevices);
+populateDevices();
+
+// ── System Audio ──────────────────────────────────────────────────────────────
+let audioCtx  = null;
+let analyser  = null;
+let tdData    = null;
+let sysStream = null;
+let sysOn     = false;
+
+async function ensureAudioCtx() {
+  if (!audioCtx) audioCtx = new AudioContext();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+}
+
+async function startCapture() {
+  await ensureAudioCtx();
+
+  const deviceId = deviceSelect.value;
+  if (!deviceId) {
+    showBlackHoleInstructions();
+    return;
+  }
+
+  const deviceLabel = deviceSelect.options[deviceSelect.selectedIndex]?.textContent || deviceId;
+  setStatus('connecting to ' + deviceLabel + '...');
+
+  try {
+    sysStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        deviceId: { exact: deviceId },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.55;
+    tdData = new Float32Array(analyser.fftSize);
+    audioCtx.createMediaStreamSource(sysStream).connect(analyser);
+
+    sysOn = true;
+    sysBtn.textContent = 'SYS ON';
+    sysBtn.classList.add('active');
+    setStatus('capturing: ' + deviceLabel, 'ok');
+
+    sysStream.getAudioTracks()[0].onended = stopCapture;
+
+  } catch (e) {
+    sysStream = null;
+    setStatus('⚠ capture failed: ' + e.message, 'err');
+    alert('Could not capture from this device.\n\nError: ' + e.name + '\n' + e.message);
+  }
+}
+
+function stopCapture() {
+  if (sysStream) sysStream.getTracks().forEach(t => t.stop());
+  analyser = null; tdData = null; sysStream = null;
+  sysOn = false;
+  sysBtn.textContent = 'SYS';
+  sysBtn.classList.remove('active');
+  setStatus('stopped');
+}
+
+function showBlackHoleInstructions() {
+  alert(
+    'No audio device selected.\n\n' +
+    'To capture system audio (e.g. MP3 players, YouTube, etc.):\n\n' +
+    '1. Install BlackHole 2ch (free):\n   https://existential.audio/blackhole/\n\n' +
+    '2. Open Audio MIDI Setup (/Applications/Utilities/)\n' +
+    '   Click + → Create Multi-Output Device\n' +
+    '   Check: BlackHole 2ch  +  your speakers/headphones\n\n' +
+    '3. System Settings → Sound → Output\n' +
+    '   Select: Multi-Output Device\n\n' +
+    '4. Click ↺ to refresh — BlackHole will appear with ★\n' +
+    '   Select it, then click SYS'
+  );
+}
+
+sysBtn.addEventListener('click', () => {
+  if (sysOn) { stopCapture(); return; }
+  startCapture();
+});
+
+refreshBtn.addEventListener('click', populateDevices);
+
+// ── Test tone ─────────────────────────────────────────────────────────────────
+let testOn = false;
+let testOsc = null;
+
+async function toggleTest() {
+  await ensureAudioCtx();
+  if (testOn) {
+    testOsc && testOsc.stop();
+    testOsc = null;
+    testOn = false;
+    testBtn.textContent = 'TEST';
+    testBtn.classList.remove('active');
+    if (!sysOn) { analyser = null; tdData = null; }
+    setStatus('test tone stopped');
+    return;
+  }
+
+  // Run a 440 Hz tone directly through the analyser to verify the pipeline
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.55;
+  tdData = new Float32Array(analyser.fftSize);
+
+  testOsc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0.5;
+  testOsc.connect(gain);
+  gain.connect(analyser);
+  // Also connect to speakers so you can hear it
+  gain.connect(audioCtx.destination);
+  testOsc.start();
+
+  testOn = true;
+  testBtn.textContent = 'TEST ON';
+  testBtn.classList.add('active');
+  setStatus('test tone active — bars should be moving', 'ok');
+}
+
+testBtn.addEventListener('click', toggleTest);
+
+// ── TTS ───────────────────────────────────────────────────────────────────────
+let speaking = false;
+
+function doSpeak() {
+  const text = textInput.value.trim();
+  if (!text) return;
+  speechSynthesis.cancel();
+  const utt = new SpeechSynthesisUtterance(text);
+  utt.rate = 0.88; utt.pitch = 0.72;
+  const voices = speechSynthesis.getVoices();
+  const pick = voices.find(v => /daniel|alex|fred|bruce|gordon|ralph/i.test(v.name))
+            || voices.find(v => v.lang === 'en-US') || voices[0];
+  if (pick) utt.voice = pick;
+  utt.onstart  = () => { speaking = true;  speakBtn.textContent = 'STOP';  speakBtn.classList.add('active'); };
+  utt.onend = utt.onerror = () => { speaking = false; speakBtn.textContent = 'SPEAK'; speakBtn.classList.remove('active'); };
+  speechSynthesis.speak(utt);
+}
+
+speakBtn.addEventListener('click', () => {
+  if (speaking) { speechSynthesis.cancel(); speaking = false; speakBtn.textContent = 'SPEAK'; speakBtn.classList.remove('active'); }
+  else doSpeak();
+});
+speechSynthesis.onvoiceschanged = () => {};
+
+// ── Audio level ───────────────────────────────────────────────────────────────
+function getRawLevel() {
+  if (analyser && tdData) {
+    analyser.getFloatTimeDomainData(tdData);
+    let sum = 0;
+    for (const s of tdData) sum += s * s;
+    return Math.min(1, Math.sqrt(sum / tdData.length) * 5.5);
+  }
+  if (speaking) {
+    const t = Date.now() / 1000;
+    const v = 0.30 + 0.22 * Math.abs(Math.sin(t * 3.8)) + 0.12 * Math.sin(t * 7.1) + 0.06 * Math.sin(t * 13.5);
+    const gate = Math.sin(t * 1.3) > -0.6 ? 1 : 0.25;
+    return Math.max(0, Math.min(1, (v + (Math.random() - 0.5) * 0.12) * gate));
+  }
+  return 0;
+}
+
+// ── Render ────────────────────────────────────────────────────────────────────
+const levels = [0, 0, 0];
+
+function draw() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  const raw = getRawLevel();
+
+  for (let col = 0; col < 3; col++) {
+    const target = Math.min(1, raw * SENS[col]);
+    const attack = target > levels[col] ? 0.42 : 0.10;
+    levels[col] += (target - levels[col]) * attack;
+    const lv = levels[col];
+    const extraBars = lv * 7;
+    const cx = COLS[col];
+
+    for (let i = 1; i <= N; i++) {
+      const bw = barWidth(i);
+      const bx = cx - bw / 2;
+      const by = TOP_Y + (i - 1) * (BAR_H + GAP);
+
+      let lit = false;
+      if (i === 8 || i === 9)    lit = lv > 0.015;
+      else if (i < 8)            lit = extraBars >= (8 - i) - 0.05;
+      else                       lit = extraBars >= (i - 9) - 0.05;
+
+      if (lit) {
+        const dist = i <= 8 ? (8 - i) : (i - 9);
+        ctx.shadowColor = '#ff0000';
+        ctx.shadowBlur  = 10;
+        ctx.fillStyle   = `rgb(${Math.floor(255 * (1 - dist * 0.038))},0,0)`;
+      } else {
+        ctx.shadowBlur = 0;
+        ctx.fillStyle  = '#120000';
+      }
+      ctx.fillRect(bx, by, bw, BAR_H);
+    }
+  }
+  ctx.shadowBlur = 0;
+  requestAnimationFrame(draw);
+}
+
+draw();
+</script>
+</body>
+</html>
